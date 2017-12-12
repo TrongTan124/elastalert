@@ -58,6 +58,8 @@ class MockElastAlerter(object):
         except Exception as e:
             print("Error connecting to ElasticSearch:", file=sys.stderr)
             print(repr(e)[:2048], file=sys.stderr)
+            if args.stop_error:
+                exit(1)
             return None
 
         if is_five:
@@ -75,6 +77,8 @@ class MockElastAlerter(object):
         except Exception as e:
             print("Error running your filter:", file=sys.stderr)
             print(repr(e)[:2048], file=sys.stderr)
+            if args.stop_error:
+                exit(1)
             return None
         num_hits = len(res['hits']['hits'])
         if not num_hits:
@@ -97,6 +101,8 @@ class MockElastAlerter(object):
         except Exception as e:
             print("Error querying Elasticsearch:", file=sys.stderr)
             print(repr(e)[:2048], file=sys.stderr)
+            if args.stop_error:
+                exit(1)
             return None
 
         num_hits = res['count']
@@ -131,6 +137,8 @@ class MockElastAlerter(object):
             except Exception as e:
                 print("Error running your filter:", file=sys.stderr)
                 print(repr(e)[:2048], file=sys.stderr)
+                if args.stop_error:
+                    exit(1)
                 return None
             num_hits = len(res['hits']['hits'])
             print("Downloaded %s documents to save" % (num_hits))
@@ -196,7 +204,11 @@ class MockElastAlerter(object):
         """ Creates an ElastAlert instance and run's over for a specific rule using either real or mock data. """
 
         # Load and instantiate rule
-        load_modules(rule)
+        # Pass an args containing the context of whether we're alerting or not
+        # It is needed to prevent unnecessary initialization of unused alerters
+        load_modules_args = argparse.Namespace()
+        load_modules_args.debug = not args.alert
+        load_modules(rule, load_modules_args)
         conf['rules'] = [rule]
 
         # If using mock data, make sure it's sorted and find appropriate time range
@@ -211,6 +223,8 @@ class MockElastAlerter(object):
                 endtime = ts_to_dt(endtime) + datetime.timedelta(seconds=1)
             except KeyError as e:
                 print("All documents must have a timestamp and _id: %s" % (e), file=sys.stderr)
+                if args.stop_error:
+                    exit(1)
                 return None
 
             # Create mock _id for documents if it's missing
@@ -256,8 +270,13 @@ class MockElastAlerter(object):
 
             if mock_writeback.call_count:
                 print("\nWould have written the following documents to writeback index (default is elastalert_status):\n")
+                errors = False
                 for call in mock_writeback.call_args_list:
                     print("%s - %s\n" % (call[0][0], call[0][1]))
+                    if call[0][0] == 'elastalert_error':
+                        errors = True
+                if errors and args.stop_error:
+                    exit(1)
 
     def load_conf(self, rules, args):
         """ Loads a default conf dictionary (from global config file, if provided, or hard-coded mocked data),
@@ -311,6 +330,7 @@ class MockElastAlerter(object):
         parser.add_argument('file', metavar='rule', type=str, help='rule configuration filename')
         parser.add_argument('--schema-only', action='store_true', help='Show only schema errors; do not run query')
         parser.add_argument('--days', type=int, default=1, action='store', help='Query the previous N days with this rule')
+        parser.add_argument('--stop-error', action='store_true', help='Stop the entire test right after the first error')
         parser.add_argument(
             '--data',
             type=str,

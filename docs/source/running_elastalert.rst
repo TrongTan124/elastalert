@@ -8,20 +8,25 @@ Requirements
 
 - Elasticsearch
 - ISO8601 or Unix timestamped data
-- Python 2.6 or 2.7
+- Python 2.7
 - pip, see requirements.txt
+- Packages on Ubuntu 14.x: python-pip python-dev libffi-dev libssl-dev
 
 Downloading and Configuring
 ---------------------------
 
-First, clone the ElastAlert repository::
+You can either install the latest released version of ElastAlert using pip::
+
+    $ pip install elastalert
+
+or you can clone the ElastAlert repository for the most recent changes::
 
     $ git clone https://github.com/Yelp/elastalert.git
 
 Install the module::
 
+    $ pip install "setuptools>=11.3"
     $ python setup.py install
-    $ pip install -r requirements.txt
 
 Depending on the version of Elasticsearch, you may need to manually install the correct version of elasticsearch-py.
 
@@ -48,6 +53,12 @@ Next, open up config.yaml.example. In it, you will find several configuration op
 ``use_ssl``: Optional; whether or not to connect to ``es_host`` using TLS; set to ``True`` or ``False``.
 
 ``verify_certs``: Optional; whether or not to verify TLS certificates; set to ``True`` or ``False``. The default is ``True``
+
+``client_cert``: Optional; path to a PEM certificate to use as the client certificate
+
+``client_key``: Optional; path to a private key file to use as the client key
+
+``ca_certs``: Optional; path to a CA cert bundle to use to verify SSL connections
 
 ``es_username``: Optional; basic-auth username for connecting to ``es_host``.
 

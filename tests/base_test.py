@@ -8,6 +8,7 @@ import threading
 import elasticsearch
 import mock
 import pytest
+from elasticsearch.exceptions import ConnectionError
 from elasticsearch.exceptions import ElasticsearchException
 
 from elastalert.enhancements import BaseEnhancement
@@ -93,7 +94,7 @@ def test_query(ea):
     ea.current_es.search.assert_called_with(body={
         'query': {'filtered': {'filter': {'bool': {'must': [{'range': {'@timestamp': {'lte': END_TIMESTAMP, 'gt': START_TIMESTAMP}}}]}}}},
         'sort': [{'@timestamp': {'order': 'asc'}}]}, index='idx', _source_include=['@timestamp'], ignore_unavailable=True,
-                                            size=ea.rules[0]['max_query_size'], scroll=ea.conf['scroll_keepalive'])
+        size=ea.rules[0]['max_query_size'], scroll=ea.conf['scroll_keepalive'])
 
 
 def test_query_with_fields(ea):
@@ -103,7 +104,7 @@ def test_query_with_fields(ea):
     ea.current_es.search.assert_called_with(body={
         'query': {'filtered': {'filter': {'bool': {'must': [{'range': {'@timestamp': {'lte': END_TIMESTAMP, 'gt': START_TIMESTAMP}}}]}}}},
         'sort': [{'@timestamp': {'order': 'asc'}}], 'fields': ['@timestamp']}, index='idx', ignore_unavailable=True,
-                                            size=ea.rules[0]['max_query_size'], scroll=ea.conf['scroll_keepalive'])
+        size=ea.rules[0]['max_query_size'], scroll=ea.conf['scroll_keepalive'])
 
 
 def test_query_with_unix(ea):
@@ -249,6 +250,29 @@ def test_match_with_module(ea):
     ea.rules[0]['match_enhancements'] = [mod]
     test_match(ea)
     mod.process.assert_called_with({'@timestamp': END, 'num_hits': 0, 'num_matches': 1})
+
+
+def test_match_with_module_from_pending(ea):
+    mod = BaseEnhancement(ea.rules[0])
+    mod.process = mock.Mock()
+    ea.rules[0]['match_enhancements'] = [mod]
+    ea.rules[0].pop('aggregation')
+    pending_alert = {'match_body': {'foo': 'bar'}, 'rule_name': ea.rules[0]['name'],
+                     'alert_time': START_TIMESTAMP, '@timestamp': START_TIMESTAMP}
+    # First call, return the pending alert, second, no associated aggregated alerts
+    ea.writeback_es.search.side_effect = [{'hits': {'hits': [{'_id': 'ABCD', '_source': pending_alert}]}},
+                                          {'hits': {'hits': []}}]
+    ea.send_pending_alerts()
+    assert mod.process.call_count == 0
+
+    # If aggregation is set, enhancement IS called
+    pending_alert = {'match_body': {'foo': 'bar'}, 'rule_name': ea.rules[0]['name'],
+                     'alert_time': START_TIMESTAMP, '@timestamp': START_TIMESTAMP}
+    ea.writeback_es.search.side_effect = [{'hits': {'hits': [{'_id': 'ABCD', '_source': pending_alert}]}},
+                                          {'hits': {'hits': []}}]
+    ea.rules[0]['aggregation'] = datetime.timedelta(minutes=10)
+    ea.send_pending_alerts()
+    assert mod.process.call_count == 1
 
 
 def test_match_with_module_with_agg(ea):
@@ -745,6 +769,7 @@ def test_get_starttime(ea):
     endtime = '2015-01-01T00:00:00Z'
     mock_es = mock.Mock()
     mock_es.search.return_value = {'hits': {'hits': [{'_source': {'endtime': endtime}}]}}
+    mock_es.info.return_value = {'version': {'number': '2.0'}}
     ea.writeback_es = mock_es
 
     # 4 days old, will return endtime
@@ -915,6 +940,17 @@ def test_rule_changes(ea):
     assert len(ea.rules) == 3
     assert not any(['new' in rule for rule in ea.rules])
 
+    # A new rule with is_enabled=False wont load
+    new_hashes = copy.copy(new_hashes)
+    new_hashes.update({'rules/rule4.yaml': 'asdf'})
+    with mock.patch('elastalert.elastalert.get_rule_hashes') as mock_hashes:
+        with mock.patch('elastalert.elastalert.load_configuration') as mock_load:
+            mock_load.return_value = {'filter': [], 'name': 'rule4', 'new': 'stuff', 'is_enabled': False, 'rule_file': 'rules/rule4.yaml'}
+            mock_hashes.return_value = new_hashes
+            ea.load_rule_changes()
+    assert len(ea.rules) == 3
+    assert not any(['new' in rule for rule in ea.rules])
+
     # An old rule which didn't load gets reloaded
     new_hashes = copy.copy(new_hashes)
     new_hashes['rules/rule4.yaml'] = 'qwerty'
@@ -990,6 +1026,82 @@ def test_exponential_realert(ea):
         assert exponent == next_res.next()
 
 
+def test_wait_until_responsive(ea):
+    """Unblock as soon as ElasticSearch becomes responsive."""
+
+    # Takes a while before becoming responsive.
+    ea.writeback_es.indices.exists.side_effect = [
+        ConnectionError(),  # ES is not yet responsive.
+        False,              # index does not yet exist.
+        True,
+    ]
+
+    clock = mock.MagicMock()
+    clock.side_effect = [0.0, 1.0, 2.0, 3.0, 4.0]
+    timeout = datetime.timedelta(seconds=3.5)
+    with mock.patch('time.sleep') as sleep:
+        ea.wait_until_responsive(timeout=timeout, clock=clock)
+
+    # Sleep as little as we can.
+    sleep.mock_calls == [
+        mock.call(1.0),
+    ]
+
+
+def test_wait_until_responsive_timeout_es_not_available(ea, capsys):
+    """Bail out if ElasticSearch doesn't (quickly) become responsive."""
+
+    # Never becomes responsive :-)
+    ea.writeback_es.ping.return_value = False
+    ea.writeback_es.indices.exists.return_value = False
+
+    clock = mock.MagicMock()
+    clock.side_effect = [0.0, 1.0, 2.0, 3.0]
+    timeout = datetime.timedelta(seconds=2.5)
+    with mock.patch('time.sleep') as sleep:
+        with pytest.raises(SystemExit) as exc:
+            ea.wait_until_responsive(timeout=timeout, clock=clock)
+        assert exc.value.code == 1
+
+    # Ensure we get useful diagnostics.
+    output, errors = capsys.readouterr()
+    assert 'Could not reach ElasticSearch at "es:14900".' in errors
+
+    # Slept until we passed the deadline.
+    sleep.mock_calls == [
+        mock.call(1.0),
+        mock.call(1.0),
+        mock.call(1.0),
+    ]
+
+
+def test_wait_until_responsive_timeout_index_does_not_exist(ea, capsys):
+    """Bail out if ElasticSearch doesn't (quickly) become responsive."""
+
+    # Never becomes responsive :-)
+    ea.writeback_es.ping.return_value = True
+    ea.writeback_es.indices.exists.return_value = False
+
+    clock = mock.MagicMock()
+    clock.side_effect = [0.0, 1.0, 2.0, 3.0]
+    timeout = datetime.timedelta(seconds=2.5)
+    with mock.patch('time.sleep') as sleep:
+        with pytest.raises(SystemExit) as exc:
+            ea.wait_until_responsive(timeout=timeout, clock=clock)
+        assert exc.value.code == 1
+
+    # Ensure we get useful diagnostics.
+    output, errors = capsys.readouterr()
+    assert 'Writeback index "wb" does not exist, did you run `elastalert-create-index`?' in errors
+
+    # Slept until we passed the deadline.
+    sleep.mock_calls == [
+        mock.call(1.0),
+        mock.call(1.0),
+        mock.call(1.0),
+    ]
+
+
 def test_stop(ea):
     """ The purpose of this test is to make sure that calling ElastAlerter.stop() will break it
     out of a ElastAlerter.start() loop. This method exists to provide a mechanism for running
@@ -1061,8 +1173,8 @@ def test_uncaught_exceptions(ea):
     assert len(ea.disabled_rules) == 1
 
     # Changing the file should re-enable it
-    ea.rule_hashes = {'rule1': 'abc'}
-    new_hashes = {'rule1': 'def'}
+    ea.rule_hashes = {'blah.yaml': 'abc'}
+    new_hashes = {'blah.yaml': 'def'}
     with mock.patch('elastalert.elastalert.get_rule_hashes') as mock_hashes:
         with mock.patch('elastalert.elastalert.load_configuration') as mock_load:
             mock_load.side_effect = [ea.disabled_rules[0]]

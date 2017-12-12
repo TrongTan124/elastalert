@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import logging
 import os
+import sys
 
 import alerts
 import enhancements
@@ -11,6 +12,7 @@ import jsonschema
 import ruletypes
 import yaml
 import yaml.scanner
+from envparse import Env
 from opsgenie import OpsGenieAlerter
 from staticconf.loader import yaml_loader
 from util import dt_to_ts
@@ -37,6 +39,8 @@ env_settings = {'ES_USE_SSL': 'use_ssl',
                 'ES_HOST': 'es_host',
                 'ES_PORT': 'es_port'}
 
+env = Env(ES_USE_SSL=bool)
+
 # Used to map the names of rules to their classes
 rules_mapping = {
     'frequency': ruletypes.FrequencyRule,
@@ -62,6 +66,8 @@ alerts_mapping = {
     'command': alerts.CommandAlerter,
     'sns': alerts.SnsAlerter,
     'hipchat': alerts.HipChatAlerter,
+    'stride': alerts.StrideAlerter,
+    'ms_teams': alerts.MsTeamsAlerter,
     'slack': alerts.SlackAlerter,
     'pagerduty': alerts.PagerDutyAlerter,
     'exotel': alerts.ExotelAlerter,
@@ -70,7 +76,7 @@ alerts_mapping = {
     'telegram': alerts.TelegramAlerter,
     'gitter': alerts.GitterAlerter,
     'servicenow': alerts.ServiceNowAlerter,
-    'simple': alerts.SimplePostAlerter
+    'post': alerts.HTTPPostAlerter
 }
 # A partial ordering of alert types. Relative order will be preserved in the resulting alerts list
 # For example, jira goes before email so the ticket # will be added to the resulting email.
@@ -91,7 +97,7 @@ def get_module(module_name):
         base_module = __import__(module_path, globals(), locals(), [module_class])
         module = getattr(base_module, module_class)
     except (ImportError, AttributeError, ValueError) as e:
-        raise EAException("Could not import module %s: %s" % (module_name, e))
+        raise EAException("Could not import module %s: %s" % (module_name, e)), None, sys.exc_info()[2]
     return module
 
 
@@ -127,7 +133,10 @@ def load_rule_yaml(filename):
         rule = loaded
         if 'import' in rule:
             # Find the path of the next file.
-            filename = os.path.join(os.path.dirname(filename), rule['import'])
+            if os.path.isabs(rule['import']):
+                filename = rule['import']
+            else:
+                filename = os.path.join(os.path.dirname(filename), rule['import'])
             del(rule['import'])  # or we could go on forever!
         else:
             break
@@ -141,6 +150,7 @@ def load_options(rule, conf, filename, args=None):
     :param rule: A dictionary of parsed YAML from a rule config file.
     :param conf: The global configuration dictionary, used for populating defaults.
     """
+    adjust_deprecated_values(rule)
 
     try:
         rule_schema.validate(rule)
@@ -206,12 +216,24 @@ def load_options(rule, conf, filename, args=None):
             return ts_to_dt_with_format(ts, ts_format=rule['timestamp_format'])
 
         def _dt_to_ts_with_format(dt):
-            return dt_to_ts_with_format(dt, ts_format=rule['timestamp_format'])
+            ts = dt_to_ts_with_format(dt, ts_format=rule['timestamp_format'])
+            if 'timestamp_format_expr' in rule:
+                # eval expression passing 'ts' and 'dt'
+                return eval(rule['timestamp_format_expr'], {'ts': ts, 'dt': dt})
+            else:
+                return ts
 
         rule['ts_to_dt'] = _ts_to_dt_with_format
         rule['dt_to_ts'] = _dt_to_ts_with_format
     else:
         raise EAException('timestamp_type must be one of iso, unix, or unix_ms')
+
+    # Add support for client ssl certificate auth
+    if 'verify_certs' in conf:
+        rule.setdefault('verify_certs', conf.get('verify_certs'))
+        rule.setdefault('ca_certs', conf.get('ca_certs'))
+        rule.setdefault('client_cert', conf.get('client_cert'))
+        rule.setdefault('client_key', conf.get('client_key'))
 
     # Set HipChat options from global config
     rule.setdefault('hipchat_msg_color', 'red')
@@ -235,6 +257,11 @@ def load_options(rule, conf, filename, args=None):
         rule['compound_aggregation_key'] = rule['aggregation_key']
         rule['aggregation_key'] = ','.join(rule['aggregation_key'])
 
+    if isinstance(rule.get('compare_key'), list):
+        rule['compound_compare_key'] = rule['compare_key']
+        rule['compare_key'] = ','.join(rule['compare_key'])
+    elif 'compare_key' in rule:
+        rule['compound_compare_key'] = [rule['compare_key']]
     # Add QK, CK and timestamp to include
     include = rule.get('include', ['*'])
     if 'query_key' in rule:
@@ -245,6 +272,8 @@ def load_options(rule, conf, filename, args=None):
         include += rule['compound_aggregation_key']
     if 'compare_key' in rule:
         include.append(rule['compare_key'])
+    if 'compound_compare_key' in rule:
+        include += rule['compound_compare_key']
     if 'top_count_keys' in rule:
         include += rule['top_count_keys']
     include.append(rule['timestamp_field'])
@@ -313,9 +342,11 @@ def load_modules(rule, args=None):
     try:
         rule['type'] = rule['type'](rule, args)
     except (KeyError, EAException) as e:
-        raise EAException('Error initializing rule %s: %s' % (rule['name'], e))
-    # Instantiate alert
-    rule['alert'] = load_alerts(rule, alert_field=rule['alert'])
+        raise EAException('Error initializing rule %s: %s' % (rule['name'], e)), None, sys.exc_info()[2]
+    # Instantiate alerts only if we're not in debug mode
+    # In debug mode alerts are not actually sent so don't bother instantiating them
+    if not args or not args.debug:
+        rule['alert'] = load_alerts(rule, alert_field=rule['alert'])
 
 
 def isyaml(filename):
@@ -371,12 +402,12 @@ def load_alerts(rule, alert_field):
             alert_field = [alert_field]
 
         alert_field = [normalize_config(x) for x in alert_field]
-        alert_field = sorted(alert_field, key=lambda (a, b): alerts_order.get(a, -1))
+        alert_field = sorted(alert_field, key=lambda (a, b): alerts_order.get(a, 1))
         # Convert all alerts into Alerter objects
         alert_field = [create_alert(a, b) for a, b in alert_field]
 
     except (KeyError, EAException) as e:
-        raise EAException('Error initiating alert %s: %s' % (rule['alert'], e))
+        raise EAException('Error initiating alert %s: %s' % (rule['alert'], e)), None, sys.exc_info()[2]
 
     return alert_field
 
@@ -394,8 +425,9 @@ def load_rules(args):
     use_rule = args.rule
 
     for env_var, conf_var in env_settings.items():
-        if env_var in os.environ:
-            conf[conf_var] = os.environ[env_var]
+        val = env(env_var, None)
+        if val is not None:
+            conf[conf_var] = val
 
     # Make sure we have all required globals
     if required_globals - frozenset(conf.keys()):
@@ -430,6 +462,9 @@ def load_rules(args):
     for rule_file in rule_files:
         try:
             rule = load_configuration(rule_file, conf, args)
+            # By setting "is_enabled: False" in rule file, a rule is easily disabled
+            if 'is_enabled' in rule and not rule['is_enabled']:
+                continue
             if rule['name'] in names:
                 raise EAException('Duplicate rule named %s' % (rule['name']))
         except EAException as e:
@@ -449,3 +484,14 @@ def get_rule_hashes(conf, use_rule=None):
         with open(rule_file) as fh:
             rule_mod_times[rule_file] = hashlib.sha1(fh.read()).digest()
     return rule_mod_times
+
+
+def adjust_deprecated_values(rule):
+    # From rename of simple HTTP alerter
+    if rule.get('type') == 'simple':
+        rule['type'] = 'post'
+        if 'simple_proxy' in rule:
+            rule['http_post_proxy'] = rule['simple_proxy']
+        if 'simple_webhook_url' in rule:
+            rule['http_post_url'] = rule['simple_webhook_url']
+        logging.warning('"simple" alerter has been renamed "post" and comptability may be removed in a future release.')

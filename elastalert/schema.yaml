@@ -38,14 +38,14 @@ oneOf:
     required: [blacklist, compare_key]
     properties:
       type: {enum: [blacklist]}
-      compare_key: {type: string}
+      compare_key: {'items': {'type': 'string'},'type': ['string', 'array']}
       blacklist: {type: array, items: {type: string}}
 
   - title: Whitelist
     required: [whitelist, compare_key, ignore_null]
     properties:
       type: {enum: [whitelist]}
-      compare_key: {type: string}
+      compare_key: {'items': {'type': 'string'},'type': ['string', 'array']}
       whitelist: {type: array, items: {type: string}}
       ignore_null: {type: boolean}
 
@@ -53,7 +53,7 @@ oneOf:
     required: [query_key, compare_key, ignore_null]
     properties:
       type: {enum: [change]}
-      compare_key: {type: string}
+      compare_key: {'items': {'type': 'string'},'type': ['string', 'array']}
       ignore_null: {type: boolean}
       timeframe: *timeframe
 
@@ -214,11 +214,17 @@ properties:
 
   ### HipChat
   hipchat_auth_token: {type: string}
-  hipchat_room_id: {type: string}
+  hipchat_room_id: {type: [string, integer]}
   hipchat_domain: {type: string}
   hipchat_ignore_ssl_errors: {type: boolean}
   hipchat_notify: {type: boolean}
   hipchat_from: {type: string}
+
+  ### Stride
+  stride_access_token: {type: string}
+  stride_cloud_id: {type: string}
+  stride_converstation_id: {type: string}
+  stride_ignore_ssl_errors: {type: boolean}
 
   ### Slack
   slack_webhook_url: *arrayOfString
@@ -232,6 +238,7 @@ properties:
   ### PagerDuty
   pagerduty_service_key: {type: string}
   pagerduty_client_name: {type: string}
+  pagerduty_event_type: {enum: [none, trigger, resolve, acknowledge]}
 
   ### Exotel
   exotel_account_sid: {type: string}
@@ -240,7 +247,7 @@ properties:
   exotel_from_number: {type: string}
 
   ### Twilio
-  twilio_accout_sid: {type: string}
+  twilio_account_sid: {type: string}
   twilio_auth_token: {type: string}
   twilio_to_number: {type: string}
   twilio_from_number: {type: string}
