@@ -1,5 +1,79 @@
 # Change Log
 
+# v0.1.31
+
+### Added
+- Added ability to add start date to new term rule
+
+### Fixed
+- Fixed a bug in create_index which would try to delete a nonexistent index
+- Apply filters to new term rule all terms query
+- Support Elasticsearch 6 for new term rule
+- Fixed is_enabled not working on rule changes
+
+
+# v0.1.30
+
+### Added
+- Alerta alerter
+- Added support for transitioning JIRA issues
+- Option to recreate index in elastalert-create-index
+
+### Fixed
+- Update jira_ custom fields before each alert if they were modified
+- Use json instead of simplejson
+- Allow for relative path for smtp_auth_file
+- Fixed some grammar issues
+- Better code formatting of index mappings
+- Better formatting and size limit for HipChat HTML
+- Fixed gif link in readme for kibana plugin
+- Fixed elastalert-test-rule with Elasticsearch > 4
+- Added documentation for is_enabled option
+
+## v0.1.29
+
+### Added
+- Added a feature forget_keys to prevent realerting when using flatline with query_key
+- Added a new alert_text_type, aggregation_summary_only
+
+### Fixed
+- Fixed incorrect documentation about es_conn_timeout default
+
+## v0.1.28
+
+### Added
+- Added support for Stride formatting of simple HTML tags
+- Added support for custom titles in Opsgenie alerts
+- Added a denominator to percentage match based alerts
+
+### Fixed
+- Fixed a bug with Stomp alerter connections
+- Removed escaping of some characaters in Slack messages
+
+## v0.1.27
+
+# Added
+- Added support for a value other than <MISSING VALUE> in formatted alerts
+
+### Fixed
+- Fixed a failed creation of elastalert indicies when using Elasticsearch 6
+- Truncate Telegram alerts to avoid API errors
+
+## v0.1.26
+
+### Added
+- Added support for Elasticsearch 6
+- Added support for mentions in Hipchat
+
+### Fixed
+- Fixed an issue where a nested field lookup would crash if one of the intermediate fields was null
+
+## v0.1.25
+
+### Fixed
+- Fixed a bug causing new term rule to break unless you passed a start time
+- Add a slight clarification on the localhost:9200 reported in es_debug_trace
+
 ## v0.1.24
 
 ### Fixed
